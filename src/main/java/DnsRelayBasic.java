@@ -44,8 +44,19 @@ public class DnsRelayBasic {
         this.idManager = new IdMappingManager();
         this.threadPool = Executors.newCachedThreadPool();
         
-        // 创建socket
-        this.serverSocket = UdpSocketWrapper.createServerSocket(DNS_PORT, DnsLogger.isDumpEnabled());
+        // 创建socket，处理端口冲突
+        try {
+            this.serverSocket = UdpSocketWrapper.createServerSocket(DNS_PORT, DnsLogger.isDumpEnabled());
+        } catch (java.net.BindException e) {
+            DnsLogger.error("Failed to bind to port " + DNS_PORT + ": " + e.getMessage());
+            DnsLogger.error("Port " + DNS_PORT + " is already in use. Please:");
+            DnsLogger.error("1. Stop any existing DNS services on port " + DNS_PORT);
+            DnsLogger.error("2. Kill any previous DNS relay instances");
+            DnsLogger.error("3. On Windows, try running as Administrator");
+            DnsLogger.error("4. Check if Windows DNS Client service is using the port");
+            throw new Exception("Cannot bind to DNS port " + DNS_PORT + ". Port is already in use.", e);
+        }
+
         this.upstreamSocket = UdpSocketWrapper.createClientSocket(DnsLogger.isDumpEnabled());
         this.upstreamSocket.setSoTimeout(5000);
         
@@ -56,7 +67,7 @@ public class DnsRelayBasic {
     }
     
     /**
-     * 主循环：使用线程池并发处理
+     * 主循环，使用线程池并发处理
      */
     public void loop() throws IOException {
         // 启动上游响应处理线程
@@ -105,11 +116,11 @@ public class DnsRelayBasic {
 
         DnsLogger.logQuery(client.toString(), dnsMsg);
 
-        // 查询本地数据库
-        String localResult = database.lookup(dnsMsg.qname);
+        // 查询本地数据库（根据查询类型）
+        String localResult = database.lookup(dnsMsg.qname, dnsMsg.qtype);
         if (localResult != null) {
             byte[] response;
-            if (database.isIntercepted(dnsMsg.qname)) {
+            if ("0.0.0.0".equals(localResult)) {
                 // Case 1: 被拦截的域名
                 response = DnsMessageUtils.buildNX(rawMsg);
                 DnsLogger.logLocalResponse(dnsMsg.qname, "NXDOMAIN", true);
@@ -181,13 +192,42 @@ public class DnsRelayBasic {
 
         DnsLogger.logUpstreamResponse(responseMsg);
 
+        // 保存成功的响应到本地数据库
+        if (responseMsg.rcode == 0 && responseMsg.ancount > 0) {
+            saveUpstreamResponse(rawResponse, mapping.originalMsg);
+        }
+
         // 恢复原始ID
         DnsMessageUtils.setMessageId(rawResponse, mapping.originalId);
 
         byte[] filteredResponse = AddressFilter.applyFilterToUpstreamResponse(rawResponse, mapping.originalMsg);
-        
+
         serverSocket.sendto(filteredResponse, mapping.client);
         DnsLogger.logRelayResponse(mapping.client.toString(), mapping.originalId);
+    }
+
+    /**
+     * 保存上游DNS响应到本地数据库
+     */
+    private void saveUpstreamResponse(byte[] response, DnsMessage originalQuery) {
+        try {
+            String[] ipAddresses = DnsMessageUtils.extractIpAddresses(response);
+
+            if (ipAddresses.length > 0) {
+                // 保存所有IP地址到本地数据库
+                for (String ip : ipAddresses) {
+                    database.saveUpstreamRecord(originalQuery.qname, ip, originalQuery.qtype);
+                }
+
+                // 如果有多个IP地址，记录到调试日志
+                if (ipAddresses.length > 1) {
+                    DnsLogger.debug("Multiple IPs found for " + originalQuery.qname +
+                        ", saved " + ipAddresses.length + " records");
+                }
+            }
+        } catch (Exception e) {
+            DnsLogger.error("Error saving upstream response for " + originalQuery.qname, e);
+        }
     }
     
     public void shutdown() {

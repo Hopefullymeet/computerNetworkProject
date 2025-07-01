@@ -141,4 +141,79 @@ public class DnsMessageUtils {
             data[1] = (byte) id;
         }
     }
+
+    /**
+     * 从DNS响应中提取IP地址
+     * @param response DNS响应消息字节数组
+     * @return IP地址列表，如果没有找到返回空数组
+     */
+    public static String[] extractIpAddresses(byte[] response) {
+        if (response.length < 12) return new String[0];
+
+        int ancount = ((response[6] & 0xff) << 8) | (response[7] & 0xff);
+        if (ancount == 0) return new String[0];
+
+        java.util.List<String> ips = new java.util.ArrayList<>();
+
+        try {
+            // 跳过header (12 bytes)
+            int pos = 12;
+
+            // 跳过question section
+            int qdcount = ((response[4] & 0xff) << 8) | (response[5] & 0xff);
+            for (int i = 0; i < qdcount; i++) {
+                // 跳过QNAME
+                while (pos < response.length && response[pos] != 0) {
+                    int len = response[pos] & 0xff;
+                    if (len > 63) break; // 压缩指针
+                    pos += len + 1;
+                }
+                pos += 5; // null terminator + QTYPE + QCLASS
+            }
+
+            // 解析answer section
+            for (int i = 0; i < ancount && pos < response.length - 10; i++) {
+                // 跳过NAME (可能是压缩指针)
+                if ((response[pos] & 0xC0) == 0xC0) {
+                    pos += 2; // 压缩指针
+                } else {
+                    while (pos < response.length && response[pos] != 0) {
+                        int len = response[pos] & 0xff;
+                        if (len > 63) break;
+                        pos += len + 1;
+                    }
+                    pos++; // null terminator
+                }
+
+                if (pos + 10 > response.length) break;
+
+                int type = ((response[pos] & 0xff) << 8) | (response[pos + 1] & 0xff);
+                int rdlength = ((response[pos + 8] & 0xff) << 8) | (response[pos + 9] & 0xff);
+                pos += 10; // TYPE + CLASS + TTL + RDLENGTH
+
+                if (pos + rdlength > response.length) break;
+
+                if (type == 1 && rdlength == 4) { // A record
+                    String ip = String.format("%d.%d.%d.%d",
+                        response[pos] & 0xff, response[pos + 1] & 0xff,
+                        response[pos + 2] & 0xff, response[pos + 3] & 0xff);
+                    ips.add(ip);
+                } else if (type == 28 && rdlength == 16) { // AAAA record
+                    StringBuilder ipv6 = new StringBuilder();
+                    for (int j = 0; j < 16; j += 2) {
+                        if (j > 0) ipv6.append(":");
+                        ipv6.append(String.format("%02x%02x",
+                            response[pos + j] & 0xff, response[pos + j + 1] & 0xff));
+                    }
+                    ips.add(ipv6.toString());
+                }
+
+                pos += rdlength;
+            }
+        } catch (Exception e) {
+            DnsLogger.debug("Error extracting IP addresses: " + e.getMessage());
+        }
+
+        return ips.toArray(new String[0]);
+    }
 }

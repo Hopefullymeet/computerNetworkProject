@@ -4,3 +4,5 @@ ipv6.example.com  2001:db8::1
 poneria.isi.edu   128.9.0.32
 ns.bupt.edu.cn    202.112.10.37
 bad.bupt.edu.cn   0.0.0.0
+ucloud.bupt.edu.cn 10.3.19.2
+ucloud.bupt.edu.cn 2001:0da8:0215:4038:0000:0000:0000:0161

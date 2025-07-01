@@ -12,6 +12,8 @@ import java.util.Map;
 public class LocalDatabase {
     
     private final Map<String, String> records = new HashMap<>();
+    private final Map<String, String> ipv4Records = new HashMap<>();  // A记录
+    private final Map<String, String> ipv6Records = new HashMap<>();  // AAAA记录
     private final String databaseFile;
     
     /**
@@ -70,11 +72,52 @@ public class LocalDatabase {
      */
     public String lookup(String domain) {
         if (domain == null) return null;
-        
+
         String result = records.get(domain.toLowerCase());
-        DnsLogger.debug("Database lookup: " + domain + " -> " + 
+        DnsLogger.debug("Database lookup: " + domain + " -> " +
             (result != null ? result : "not found"));
-        
+
+        return result;
+    }
+
+    /**
+     * 根据查询类型查询域名对应的IP地址
+     * @param domain 域名（不区分大小写）
+     * @param qtype 查询类型 (1=A, 28=AAAA)
+     * @return IP地址字符串，如果不存在返回null
+     */
+    public String lookup(String domain, int qtype) {
+        if (domain == null) return null;
+
+        String key = domain.toLowerCase();
+        String result = null;
+
+        // 首先检查原始记录（静态配置的记录）
+        result = records.get(key);
+        if (result != null) {
+            DnsLogger.debug("Database lookup: " + domain + " (static) -> " + result);
+            return result;
+        }
+
+        // 然后根据查询类型检查动态记录
+        if (qtype == 1) { // A记录
+            result = ipv4Records.get(key);
+            DnsLogger.debug("Database lookup: " + domain + " A -> " +
+                (result != null ? result : "not found"));
+        } else if (qtype == 28) { // AAAA记录
+            result = ipv6Records.get(key);
+            DnsLogger.debug("Database lookup: " + domain + " AAAA -> " +
+                (result != null ? result : "not found"));
+        } else {
+            // 其他类型查询，检查是否有任何记录
+            result = ipv4Records.get(key);
+            if (result == null) {
+                result = ipv6Records.get(key);
+            }
+            DnsLogger.debug("Database lookup: " + domain + " TYPE" + qtype + " -> " +
+                (result != null ? result : "not found"));
+        }
+
         return result;
     }
     
@@ -136,6 +179,74 @@ public class LocalDatabase {
             throw new IllegalArgumentException("Invalid domain or IP: " + domain + " -> " + ip);
         }
     }
+
+    /**
+     * 将从上游服务器查询到的记录保存到本地数据库文件
+     * @param domain 域名
+     * @param ip IP地址
+     * @param recordType 记录类型 (1=A, 28=AAAA)
+     */
+    public void saveUpstreamRecord(String domain, String ip, int recordType) {
+        if (isValidDomainName(domain) && isValidIpAddress(ip)) {
+            String key = domain.toLowerCase();
+
+            // 保存到内存
+            if (recordType == 1) { // A记录
+                ipv4Records.put(key, ip);
+                DnsLogger.log("Saved upstream record: " + domain + " A -> " + ip);
+            } else if (recordType == 28) { // AAAA记录
+                ipv6Records.put(key, ip);
+                DnsLogger.log("Saved upstream record: " + domain + " AAAA -> " + ip);
+            } else {
+                // 其他类型记录，根据IP格式判断存储位置
+                if (ip.contains(":")) {
+                    ipv6Records.put(key, ip);
+                    DnsLogger.log("Saved upstream record: " + domain + " TYPE" + recordType + " (IPv6) -> " + ip);
+                } else {
+                    ipv4Records.put(key, ip);
+                    DnsLogger.log("Saved upstream record: " + domain + " TYPE" + recordType + " (IPv4) -> " + ip);
+                }
+            }
+
+            // 保存到文件
+            appendToFile(domain, ip);
+        } else {
+            DnsLogger.error("Invalid upstream record: " + domain + " -> " + ip);
+        }
+    }
+
+    /**
+     * 将记录追加到数据库文件
+     * @param domain 域名
+     * @param ip IP地址
+     */
+    private void appendToFile(String domain, String ip) {
+        try (FileWriter writer = new FileWriter(databaseFile, true)) {
+            // 确保在追加前有换行符（如果文件不为空且最后没有换行符）
+            File file = new File(databaseFile);
+            if (file.exists() && file.length() > 0) {
+                // 检查文件最后一个字符是否为换行符
+                try (RandomAccessFile raf = new RandomAccessFile(databaseFile, "r")) {
+                    if (raf.length() > 0) {
+                        raf.seek(raf.length() - 1);
+                        byte lastByte = raf.readByte();
+                        // 如果最后一个字符不是换行符，先添加换行符
+                        if (lastByte != '\n' && lastByte != '\r') {
+                            writer.write(System.lineSeparator());
+                        }
+                    }
+                } catch (IOException e) {
+                    DnsLogger.debug("Could not check file ending, proceeding with append");
+                }
+            }
+
+            writer.write(domain + " " + ip + System.lineSeparator());
+            writer.flush();
+            DnsLogger.debug("Appended to file: " + domain + " -> " + ip);
+        } catch (IOException e) {
+            DnsLogger.error("Failed to append record to file: " + databaseFile, e);
+        }
+    }
     
     /**
      * 删除记录
@@ -182,19 +293,38 @@ public class LocalDatabase {
         if (ip == null || ip.isEmpty()) {
             return false;
         }
-        
+
         // 检查IPv4格式
         if (ip.matches("^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$")) {
             return true;
         }
-        
-        // 检查IPv6格式（简化版）
-        if (ip.matches("^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$") ||
-            ip.matches("^::1$") || ip.matches("^::$")) {
+
+        // 检查IPv6格式（增强版）
+        if (isValidIpv6(ip)) {
             return true;
         }
-        
+
         return false;
+    }
+
+    /**
+     * 验证IPv6地址格式
+     * @param ip IPv6地址字符串
+     * @return 如果格式有效返回true
+     */
+    private boolean isValidIpv6(String ip) {
+        if (ip == null || ip.isEmpty()) {
+            return false;
+        }
+
+        // 简单的IPv6格式检查
+        try {
+            // 使用Java内置的IPv6地址验证
+            java.net.InetAddress.getByName(ip);
+            return ip.contains(":"); // 确保是IPv6格式
+        } catch (Exception e) {
+            return false;
+        }
     }
     
     /**
