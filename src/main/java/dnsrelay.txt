@@ -1,0 +1,6 @@
+; 域名        IP(支持 v4/v6)             0.0.0.0 表示 NXDOMAIN
+example.com       93.184.216.34
+ipv6.example.com  2001:db8::1
+poneria.isi.edu   128.9.0.32
+ns.bupt.edu.cn    202.112.10.37
+bad.bupt.edu.cn   0.0.0.0
